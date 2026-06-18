@@ -159,6 +159,11 @@ final class WhepPlayer: NSObject {
     }
 
     private func setRemoteAnswer(_ answerSDP: String) {
+        guard answerSDP.hasPrefix("v=0") else {
+            fail(WhepRuntimeError.message("Invalid WHEP answer SDP: \(String(answerSDP.prefix(120)))"))
+            return
+        }
+
         notifyStatus("Applying WHEP answer")
         let answer = RTCSessionDescription(type: .answer, sdp: answerSDP)
         peerConnection?.setRemoteDescription(answer) { [weak self] error in

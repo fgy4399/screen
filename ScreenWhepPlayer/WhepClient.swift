@@ -14,6 +14,7 @@ enum WhepClientError: LocalizedError {
     case invalidResponse
     case httpStatus(Int, String)
     case emptyAnswer
+    case invalidAnswer(contentType: String?, preview: String)
 
     var errorDescription: String? {
         switch self {
@@ -23,6 +24,8 @@ enum WhepClientError: LocalizedError {
             return "WHEP server returned HTTP \(code): \(body)"
         case .emptyAnswer:
             return "WHEP server returned an empty SDP answer."
+        case let .invalidAnswer(contentType, preview):
+            return "WHEP server returned a non-SDP answer. Content-Type: \(contentType ?? "unknown"). Body: \(preview)"
         }
     }
 }
@@ -70,6 +73,14 @@ final class WhepClient {
                 return
             }
 
+            guard self.looksLikeSDP(answer) else {
+                completion(.failure(WhepClientError.invalidAnswer(
+                    contentType: httpResponse.value(forHTTPHeaderField: "Content-Type"),
+                    preview: self.preview(answer)
+                )))
+                return
+            }
+
             let resourceURL = self.resolveResourceURL(from: httpResponse)
             completion(.success(WhepSession(answerSDP: answer, resourceURL: resourceURL)))
         }.resume()
@@ -94,5 +105,14 @@ final class WhepClient {
         }
 
         return URL(string: location, relativeTo: endpoint.url)?.absoluteURL
+    }
+
+    private func looksLikeSDP(_ text: String) -> Bool {
+        text.hasPrefix("v=0") && text.contains("\na=")
+    }
+
+    private func preview(_ text: String) -> String {
+        let normalized = text.replacingOccurrences(of: "\n", with: "\\n")
+        return String(normalized.prefix(320))
     }
 }
