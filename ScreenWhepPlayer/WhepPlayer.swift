@@ -30,6 +30,7 @@ final class WhepPlayer: NSObject {
     private var shouldPostOfferWhenIceReady = false
     private var didHitLocalIceTimeout = false
     private var connectionAttemptID = 0
+    private var remoteDescriptionAttemptID = 0
 
     init(videoRenderer: RTCVideoRenderer) {
         self.videoRenderer = videoRenderer
@@ -48,6 +49,7 @@ final class WhepPlayer: NSObject {
             self.shouldPostOfferWhenIceReady = false
             self.didHitLocalIceTimeout = false
             self.connectionAttemptID += 1
+            self.remoteDescriptionAttemptID += 1
             self.notifyStatus("Creating peer connection")
 
             guard let peerConnection = self.makePeerConnection() else {
@@ -201,6 +203,7 @@ final class WhepPlayer: NSObject {
         pendingRemoteCandidates = sanitized.candidates
         lastSanitizedAnswerSDP = validationSDP
         lastSanitizationMode = sanitized.mode.rawValue
+        recordDebugEvent("Preparing remote description with \(sanitized.mode.rawValue) SDP")
         publishDebugInfo(extra: "Received WHEP answer, applying \(sanitized.mode.rawValue) SDP")
 
         let validation = validateAnswerSDP(validationSDP)
@@ -211,12 +214,20 @@ final class WhepPlayer: NSObject {
 
         notifyStatus("Applying WHEP answer: \(validation.summary)")
         let answer = RTCSessionDescription(type: .answer, sdp: validationSDP)
+        let remoteDescriptionAttemptID = self.remoteDescriptionAttemptID + 1
+        self.remoteDescriptionAttemptID = remoteDescriptionAttemptID
+        recordDebugEvent("Calling setRemoteDescription with \(sanitized.mode.rawValue) SDP")
+        scheduleRemoteDescriptionTimeout(remoteDescriptionAttemptID)
         peerConnection?.setRemoteDescription(answer) { [weak self] error in
             guard let self else {
                 return
             }
 
             self.workerQueue.async {
+                guard self.remoteDescriptionAttemptID == remoteDescriptionAttemptID else {
+                    return
+                }
+
                 if let error {
                     let errorDetail = self.describe(error)
                     let nextAttemptIndex = attemptIndex + 1
@@ -227,8 +238,10 @@ final class WhepPlayer: NSObject {
                         return
                     }
 
-                    self.publishDebugInfo(extra: "setRemoteDescription failed: \(errorDetail)")
-                    self.fail(WhepRuntimeError.message("setRemoteDescription failed: \(errorDetail). Debug copied. Answer: \(validation.summary)"))
+                    self.fail(
+                        WhepRuntimeError.message("setRemoteDescription failed: \(errorDetail). Debug copied. Answer: \(validation.summary)"),
+                        debugExtra: "setRemoteDescription failed: \(errorDetail)"
+                    )
                     return
                 }
 
@@ -259,6 +272,7 @@ final class WhepPlayer: NSObject {
         shouldPostOfferWhenIceReady = false
         didHitLocalIceTimeout = false
         connectionAttemptID += 1
+        remoteDescriptionAttemptID += 1
         remoteVideoTrack?.remove(videoRenderer)
         remoteVideoTrack = nil
         peerConnection?.close()
@@ -292,13 +306,25 @@ final class WhepPlayer: NSObject {
         }
     }
 
-    private func fail(_ error: Error) {
+    private func fail(_ error: Error, debugExtra: String? = nil) {
+        let debugInfo = debugExtra.map { makeDebugInfo(extra: $0) }
         DispatchQueue.main.async {
+            if let debugInfo {
+                self.delegate?.whepPlayer(self, didUpdateDebugInfo: debugInfo)
+            }
+
             self.delegate?.whepPlayer(self, didFailWith: error)
         }
     }
 
     private func publishDebugInfo(extra: String) {
+        let debugInfo = makeDebugInfo(extra: extra)
+        DispatchQueue.main.async {
+            self.delegate?.whepPlayer(self, didUpdateDebugInfo: debugInfo)
+        }
+    }
+
+    private func makeDebugInfo(extra: String) -> String {
         let candidates = pendingRemoteCandidates
             .map { "mid=\($0.sdpMid ?? "<nil>") index=\($0.sdpMLineIndex) sdp=\($0.sdp)" }
             .joined(separator: "\n")
@@ -332,10 +358,7 @@ final class WhepPlayer: NSObject {
         === Local candidates ===
         \(localCandidateLines.isEmpty ? "<none>" : localCandidateLines)
         """
-
-        DispatchQueue.main.async {
-            self.delegate?.whepPlayer(self, didUpdateDebugInfo: debugInfo)
-        }
+        return debugInfo
     }
 
     private func recordDebugEvent(_ event: String) {
@@ -502,8 +525,26 @@ final class WhepPlayer: NSObject {
             }
 
             self.recordDebugEvent("Connection timeout: \(self.describeCurrentPeerConnectionState())")
-            self.publishDebugInfo(extra: "Connection timeout")
-            self.fail(WhepRuntimeError.message("Connection timeout. Debug copied. Check MediaMTX UDP/TCP ICE reachability."))
+            self.fail(
+                WhepRuntimeError.message("Connection timeout. Debug copied. Check MediaMTX UDP/TCP ICE reachability."),
+                debugExtra: "Connection timeout"
+            )
+        }
+    }
+
+    private func scheduleRemoteDescriptionTimeout(_ attemptID: Int) {
+        workerQueue.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self,
+                  self.remoteDescriptionAttemptID == attemptID,
+                  self.peerConnection?.remoteDescription == nil else {
+                return
+            }
+
+            self.recordDebugEvent("setRemoteDescription timeout: \(self.describeCurrentPeerConnectionState())")
+            self.fail(
+                WhepRuntimeError.message("setRemoteDescription timeout. Debug copied."),
+                debugExtra: "setRemoteDescription timeout"
+            )
         }
     }
 
@@ -840,8 +881,8 @@ private struct SanitizedAnswer {
 }
 
 private enum AnswerSanitizationMode: String, CaseIterable {
-    case unifiedPlan = "unified-plan"
     case ssrcMsid = "ssrc-msid"
+    case unifiedPlan = "unified-plan"
     case minimalMsid = "minimal-msid"
 }
 
