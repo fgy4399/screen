@@ -190,7 +190,7 @@ final class PlayerViewController: UIViewController {
 
     private func updateVideoHeightForKeyboard(isVisible: Bool) {
         videoHeightConstraint?.isActive = false
-        let multiplier: CGFloat = isVisible ? 0.22 : 0.62
+        let multiplier: CGFloat = isVisible ? 0.12 : 0.62
         let constraint = videoView.heightAnchor.constraint(equalTo: view.heightAnchor, multiplier: multiplier)
         constraint.isActive = true
         videoHeightConstraint = constraint
@@ -253,6 +253,17 @@ extension PlayerViewController: WhepPlayerDelegate {
 }
 
 extension PlayerViewController: UITextFieldDelegate {
+    func textFieldDidBeginEditing(_ textField: UITextField) {
+        updateVideoHeightForKeyboard(isVisible: true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            self.scrollActiveFieldIntoView()
+        }
+    }
+
+    func textFieldDidEndEditing(_ textField: UITextField) {
+        updateVideoHeightForKeyboard(isVisible: false)
+    }
+
     func textFieldShouldReturn(_ textField: UITextField) -> Bool {
         textField.resignFirstResponder()
         return true

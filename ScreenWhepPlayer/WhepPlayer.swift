@@ -159,15 +159,15 @@ final class WhepPlayer: NSObject {
     }
 
     private func setRemoteAnswer(_ answerSDP: String) {
-        let normalizedAnswerSDP = normalizeSDP(answerSDP)
-        let validation = validateAnswerSDP(normalizedAnswerSDP)
+        let validationSDP = normalizeSDPForValidation(answerSDP)
+        let validation = validateAnswerSDP(validationSDP)
         guard validation.isValid else {
             fail(WhepRuntimeError.message("Invalid WHEP answer SDP: \(validation.summary)"))
             return
         }
 
         notifyStatus("Applying WHEP answer: \(validation.summary)")
-        let answer = RTCSessionDescription(type: .answer, sdp: normalizedAnswerSDP)
+        let answer = RTCSessionDescription(type: .answer, sdp: normalizeSDPForWebRTC(answerSDP))
         peerConnection?.setRemoteDescription(answer) { [weak self] error in
             guard let self else {
                 return
@@ -248,10 +248,18 @@ final class WhepPlayer: NSObject {
         return (isValid, summary)
     }
 
-    private func normalizeSDP(_ sdp: String) -> String {
+    private func normalizeSDPForValidation(_ sdp: String) -> String {
         sdp
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
+    }
+
+    private func normalizeSDPForWebRTC(_ sdp: String) -> String {
+        let lines = normalizeSDPForValidation(sdp)
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+        let trimmedLines = lines.last == "" ? Array(lines.dropLast()) : lines
+        return trimmedLines.joined(separator: "\r\n") + "\r\n"
     }
 }
 
