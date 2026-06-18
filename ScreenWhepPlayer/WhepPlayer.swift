@@ -207,18 +207,18 @@ final class WhepPlayer: NSObject {
         lastSanitizationMode = sanitized.mode.rawValue
         let remoteDescriptionAttemptID = self.remoteDescriptionAttemptID + 1
         self.remoteDescriptionAttemptID = remoteDescriptionAttemptID
-        remoteDescriptionStage = "validating"
+        remoteDescriptionStage = "prepared"
         scheduleRemoteDescriptionTimeout(remoteDescriptionAttemptID)
         recordDebugEvent("Preparing remote description with \(sanitized.mode.rawValue) SDP")
 
-        let validation = validateAnswerSDP(validationSDP)
-        guard validation.isValid else {
-            fail(WhepRuntimeError.message("Invalid WHEP answer SDP: \(validation.summary)"))
+        let summary = answerSDPSummary(validationSDP)
+        guard validationSDP.hasPrefix("v=0"), validationSDP.contains("\r\nm=video ") else {
+            fail(WhepRuntimeError.message("Invalid WHEP answer SDP: \(summary)"))
             return
         }
 
-        recordDebugEvent("Answer validation passed: \(validation.summary)")
-        notifyStatus("Applying WHEP answer: \(validation.summary)")
+        recordDebugEvent("Answer summary: \(summary)")
+        notifyStatus("Applying WHEP answer: \(summary)")
         remoteDescriptionStage = "constructing"
         recordDebugEvent("Constructing RTCSessionDescription with \(sanitized.mode.rawValue) SDP")
 
@@ -264,7 +264,7 @@ final class WhepPlayer: NSObject {
                             }
 
                             self.fail(
-                                WhepRuntimeError.message("setRemoteDescription failed: \(errorDetail). Debug copied. Answer: \(validation.summary)"),
+                                WhepRuntimeError.message("setRemoteDescription failed: \(errorDetail). Debug copied. Answer: \(summary)"),
                                 debugExtra: "setRemoteDescription failed: \(errorDetail)"
                             )
                             return
@@ -499,22 +499,12 @@ final class WhepPlayer: NSObject {
             || detail.contains("sdp")
     }
 
-    private func validateAnswerSDP(_ answerSDP: String) -> (isValid: Bool, summary: String) {
-        let lines = answerSDP.split(separator: "\n", omittingEmptySubsequences: true)
-        let mediaLines = lines.filter { $0.hasPrefix("m=") }.map(String.init)
-        let hasIceUfrag = lines.contains { $0.hasPrefix("a=ice-ufrag:") }
-        let hasFingerprint = lines.contains { $0.hasPrefix("a=fingerprint:") }
-        let hasSetup = lines.contains { $0.hasPrefix("a=setup:") }
-        let firstLines = lines.prefix(5).joined(separator: " | ")
-        let summary = "len=\(answerSDP.count), media=\(mediaLines.joined(separator: ",")), ice=\(hasIceUfrag), fingerprint=\(hasFingerprint), setup=\(hasSetup), head=\(firstLines)"
-
-        let isValid = answerSDP.hasPrefix("v=0")
-            && !mediaLines.isEmpty
-            && hasIceUfrag
-            && hasFingerprint
-            && hasSetup
-
-        return (isValid, summary)
+    private func answerSDPSummary(_ answerSDP: String) -> String {
+        let hasVideo = answerSDP.contains("\r\nm=video ")
+        let hasIceUfrag = answerSDP.contains("\r\na=ice-ufrag:")
+        let hasFingerprint = answerSDP.contains("\r\na=fingerprint:")
+        let hasSetup = answerSDP.contains("\r\na=setup:")
+        return "len=\(answerSDP.count), video=\(hasVideo), ice=\(hasIceUfrag), fingerprint=\(hasFingerprint), setup=\(hasSetup)"
     }
 
     private func normalizeSDPForValidation(_ sdp: String) -> String {
