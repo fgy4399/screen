@@ -1,0 +1,5 @@
+.ace-tool/
+.spm-cache/
+DerivedData/
+*.xcuserstate
+xcuserdata/

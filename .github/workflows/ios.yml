@@ -1,0 +1,246 @@
+name: iOS
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      bundle_id:
+        description: Bundle identifier used for unsigned/manual builds
+        required: false
+        default: com.local.ScreenWhepPlayer
+      build_signed_ipa:
+        description: Also build Apple-signed IPA with repository signing secrets
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+env:
+  PROJECT: ScreenWhepPlayer.xcodeproj
+  SCHEME: ScreenWhepPlayer
+  CONFIGURATION: Release
+  DERIVED_DATA: DerivedData
+  ARCHIVE_PATH: build/ScreenWhepPlayer.xcarchive
+  EXPORT_PATH: build/export
+  APP_BUNDLE_ID: com.local.ScreenWhepPlayer
+
+jobs:
+  simulator-build:
+    name: Simulator Build
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app
+
+      - name: Resolve packages
+        run: |
+          xcodebuild \
+            -resolvePackageDependencies \
+            -project "$PROJECT"
+
+      - name: Build simulator app
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration "$CONFIGURATION" \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$DERIVED_DATA" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package simulator app
+        run: |
+          mkdir -p build/simulator
+          APP_PATH=$(find "$DERIVED_DATA/Build/Products" -maxdepth 4 -type d -path "*-iphonesimulator/*.app" -name "$SCHEME.app" | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "Simulator app not found"
+            exit 1
+          fi
+          ditto -c -k --keepParent "$APP_PATH" "build/simulator/$SCHEME-simulator.zip"
+
+      - name: Upload simulator artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScreenWhepPlayer-simulator
+          path: build/simulator/ScreenWhepPlayer-simulator.zip
+          if-no-files-found: error
+
+  unsigned-device-ipa:
+    name: Unsigned Device IPA
+    runs-on: macos-15
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app
+
+      - name: Resolve packages
+        run: |
+          xcodebuild \
+            -resolvePackageDependencies \
+            -project "$PROJECT"
+
+      - name: Build unsigned device app
+        env:
+          WORKFLOW_BUNDLE_ID: ${{ inputs.bundle_id }}
+        run: |
+          BUNDLE_ID="${WORKFLOW_BUNDLE_ID:-$APP_BUNDLE_ID}"
+          set -o pipefail
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration "$CONFIGURATION" \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$DERIVED_DATA" \
+            PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package unsigned IPA
+        run: |
+          mkdir -p build/unsigned/Payload
+          APP_PATH=$(find "$DERIVED_DATA/Build/Products" -maxdepth 4 -type d -path "*-iphoneos/*.app" -name "$SCHEME.app" | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "Device app not found"
+            exit 1
+          fi
+          ditto "$APP_PATH" "build/unsigned/Payload/$SCHEME.app"
+          cd build/unsigned
+          zip -qry "../$SCHEME-unsigned.ipa" Payload
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScreenWhepPlayer-unsigned-ipa
+          path: build/ScreenWhepPlayer-unsigned.ipa
+          if-no-files-found: error
+
+  signed-ipa:
+    name: Signed IPA
+    runs-on: macos-15
+    if: github.event_name == 'workflow_dispatch' && inputs.build_signed_ipa == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app
+
+      - name: Validate signing secrets
+        run: |
+          test -n "${{ secrets.IOS_CERTIFICATE_P12_BASE64 }}"
+          test -n "${{ secrets.IOS_CERTIFICATE_PASSWORD }}"
+          test -n "${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}"
+          test -n "${{ secrets.IOS_TEAM_ID }}"
+          test -n "${{ secrets.IOS_PROVISION_PROFILE_NAME }}"
+
+      - name: Install signing assets
+        env:
+          CERTIFICATE_P12_BASE64: ${{ secrets.IOS_CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          PROVISION_PROFILE_BASE64: ${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}
+          KEYCHAIN_PASSWORD_SECRET: ${{ secrets.IOS_KEYCHAIN_PASSWORD }}
+        run: |
+          KEYCHAIN_PASSWORD="${KEYCHAIN_PASSWORD_SECRET:-github-actions-keychain}"
+          CERTIFICATE_PATH="$RUNNER_TEMP/build_certificate.p12"
+          PP_PATH="$RUNNER_TEMP/build_profile.mobileprovision"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+
+          echo "$CERTIFICATE_P12_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
+          echo "$PROVISION_PROFILE_BASE64" | base64 --decode > "$PP_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          UUID=$(/usr/libexec/PlistBuddy -c 'Print UUID' /dev/stdin <<< "$(security cms -D -i "$PP_PATH")")
+          cp "$PP_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$UUID.mobileprovision"
+
+      - name: Resolve packages
+        run: |
+          xcodebuild \
+            -resolvePackageDependencies \
+            -project "$PROJECT"
+
+      - name: Archive
+        env:
+          IOS_BUNDLE_ID_SECRET: ${{ secrets.IOS_BUNDLE_ID }}
+        run: |
+          BUNDLE_ID="${IOS_BUNDLE_ID_SECRET:-$APP_BUNDLE_ID}"
+          set -o pipefail
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration "$CONFIGURATION" \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$ARCHIVE_PATH" \
+            DEVELOPMENT_TEAM='${{ secrets.IOS_TEAM_ID }}' \
+            PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
+            CODE_SIGN_STYLE=Manual \
+            PROVISIONING_PROFILE_SPECIFIER='${{ secrets.IOS_PROVISION_PROFILE_NAME }}' \
+            archive
+
+      - name: Create export options
+        env:
+          IOS_BUNDLE_ID_SECRET: ${{ secrets.IOS_BUNDLE_ID }}
+          IOS_EXPORT_METHOD_SECRET: ${{ secrets.IOS_EXPORT_METHOD }}
+        run: |
+          BUNDLE_ID="${IOS_BUNDLE_ID_SECRET:-$APP_BUNDLE_ID}"
+          EXPORT_METHOD="${IOS_EXPORT_METHOD_SECRET:-ad-hoc}"
+          mkdir -p build
+          cat > build/ExportOptions.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>$EXPORT_METHOD</string>
+            <key>teamID</key>
+            <string>${{ secrets.IOS_TEAM_ID }}</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>$BUNDLE_ID</key>
+              <string>${{ secrets.IOS_PROVISION_PROFILE_NAME }}</string>
+            </dict>
+            <key>stripSwiftSymbols</key>
+            <true/>
+          </dict>
+          </plist>
+          EOF
+
+      - name: Export IPA
+        run: |
+          xcodebuild \
+            -exportArchive \
+            -archivePath "$ARCHIVE_PATH" \
+            -exportPath "$EXPORT_PATH" \
+            -exportOptionsPlist build/ExportOptions.plist
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScreenWhepPlayer-ipa
+          path: build/export/*.ipa
+          if-no-files-found: error
