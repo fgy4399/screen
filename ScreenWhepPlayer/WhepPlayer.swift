@@ -4,6 +4,7 @@ import WebRTC
 protocol WhepPlayerDelegate: AnyObject {
     func whepPlayer(_ player: WhepPlayer, didChangeStatus status: String)
     func whepPlayer(_ player: WhepPlayer, didFailWith error: Error)
+    func whepPlayer(_ player: WhepPlayer, didUpdateDebugInfo debugInfo: String)
 }
 
 final class WhepPlayer: NSObject {
@@ -18,6 +19,9 @@ final class WhepPlayer: NSObject {
     private var sessionResourceURL: URL?
     private var pendingLocalDescription: RTCSessionDescription?
     private var remoteVideoTrack: RTCVideoTrack?
+    private var lastOfferSDP: String?
+    private var lastAnswerSDP: String?
+    private var lastSanitizedAnswerSDP: String?
     private var hasPostedOffer = false
 
     init(videoRenderer: RTCVideoRenderer) {
@@ -139,6 +143,8 @@ final class WhepPlayer: NSObject {
         }
 
         hasPostedOffer = true
+        lastOfferSDP = localDescription.sdp
+        publishDebugInfo(extra: "Posting WHEP offer")
         notifyStatus("Posting WHEP offer")
 
         client?.createSession(offerSDP: localDescription.sdp) { [weak self] result in
@@ -159,7 +165,11 @@ final class WhepPlayer: NSObject {
     }
 
     private func setRemoteAnswer(_ answerSDP: String) {
+        lastAnswerSDP = answerSDP
         let validationSDP = sanitizeAnswerSDP(normalizeSDPForValidation(answerSDP))
+        lastSanitizedAnswerSDP = validationSDP
+        publishDebugInfo(extra: "Received WHEP answer")
+
         let validation = validateAnswerSDP(validationSDP)
         guard validation.isValid else {
             fail(WhepRuntimeError.message("Invalid WHEP answer SDP: \(validation.summary)"))
@@ -175,7 +185,9 @@ final class WhepPlayer: NSObject {
 
             self.workerQueue.async {
                 if let error {
-                    self.fail(WhepRuntimeError.message("setRemoteDescription failed: \(error.localizedDescription). Answer: \(validation.summary)"))
+                    let errorDetail = self.describe(error)
+                    self.publishDebugInfo(extra: "setRemoteDescription failed: \(errorDetail)")
+                    self.fail(WhepRuntimeError.message("setRemoteDescription failed: \(errorDetail). Debug copied. Answer: \(validation.summary)"))
                     return
                 }
 
@@ -191,6 +203,9 @@ final class WhepPlayer: NSObject {
 
         sessionResourceURL = nil
         pendingLocalDescription = nil
+        lastOfferSDP = nil
+        lastAnswerSDP = nil
+        lastSanitizedAnswerSDP = nil
         hasPostedOffer = false
         remoteVideoTrack?.remove(videoRenderer)
         remoteVideoTrack = nil
@@ -228,6 +243,35 @@ final class WhepPlayer: NSObject {
         DispatchQueue.main.async {
             self.delegate?.whepPlayer(self, didFailWith: error)
         }
+    }
+
+    private func publishDebugInfo(extra: String) {
+        let debugInfo = """
+        \(extra)
+
+        === Local offer SDP ===
+        \(lastOfferSDP ?? "<nil>")
+
+        === Raw remote answer SDP ===
+        \(lastAnswerSDP ?? "<nil>")
+
+        === Sanitized remote answer SDP ===
+        \(lastSanitizedAnswerSDP ?? "<nil>")
+        """
+
+        DispatchQueue.main.async {
+            self.delegate?.whepPlayer(self, didUpdateDebugInfo: debugInfo)
+        }
+    }
+
+    private func describe(_ error: Error) -> String {
+        let nsError = error as NSError
+        let userInfo = nsError.userInfo
+            .map { "\($0.key)=\($0.value)" }
+            .sorted()
+            .joined(separator: ", ")
+
+        return "domain=\(nsError.domain), code=\(nsError.code), description=\(nsError.localizedDescription), userInfo={\(userInfo)}"
     }
 
     private func validateAnswerSDP(_ answerSDP: String) -> (isValid: Bool, summary: String) {

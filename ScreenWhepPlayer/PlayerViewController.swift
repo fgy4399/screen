@@ -10,6 +10,7 @@ final class PlayerViewController: UIViewController {
     private let startButton = UIButton(type: .system)
     private let stopButton = UIButton(type: .system)
     private let statusLabel = UILabel()
+    private var lastDebugInfo = ""
     private var videoHeightConstraint: NSLayoutConstraint?
 
     private lazy var player = WhepPlayer(videoRenderer: videoView)
@@ -249,6 +250,14 @@ extension PlayerViewController: WhepPlayerDelegate {
 
     func whepPlayer(_ player: WhepPlayer, didFailWith error: Error) {
         statusLabel.text = "Error: \(error.localizedDescription)"
+        if !lastDebugInfo.isEmpty {
+            UIPasteboard.general.string = lastDebugInfo
+            statusLabel.text = "Error: \(error.localizedDescription)\n\nDebug copied to clipboard."
+        }
+    }
+
+    func whepPlayer(_ player: WhepPlayer, didUpdateDebugInfo debugInfo: String) {
+        lastDebugInfo = debugInfo
     }
 }
 
