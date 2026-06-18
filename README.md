@@ -60,6 +60,7 @@ Optional repository secrets:
 - OBS publishes with `http://192.168.1.10:8889/mystream/whip`.
 - This app plays with `http://192.168.1.10:8889/mystream/whep`. The browser page `http://192.168.1.10:8889/mystream` is not the native WHEP API endpoint.
 - If the app shows `sessionDescription is null`, the WHEP HTTP response was not a valid SDP answer. Install the latest build; it reports the response `Content-Type` and body preview so you can see whether MediaMTX returned HTML, JSON, or another error payload.
+- The app posts the initial local SDP offer immediately after `setLocalDescription`, then waits for MediaMTX's SDP answer. Full WHEP trickle ICE `PATCH` support is intentionally not implemented yet.
 - Keep the source stream WebRTC-friendly. Start with H264 without B-frames and Opus/AAC where possible.
 - If the iPad is not on the same LAN as MediaMTX, configure `webrtcAdditionalHosts` and STUN/TURN in MediaMTX.
 - This prototype intentionally uses non-trickle ICE for simpler first-pass compatibility. Add WHEP `PATCH application/trickle-ice-sdpfrag` later if connection setup latency matters.

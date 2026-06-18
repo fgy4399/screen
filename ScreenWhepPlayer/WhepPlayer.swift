@@ -117,7 +117,7 @@ final class WhepPlayer: NSObject {
                             return
                         }
 
-                        self.notifyStatus("Gathering ICE candidates")
+                        self.notifyStatus("Posting initial WHEP offer")
                         self.postOfferIfReady()
                     }
                 }
@@ -130,7 +130,7 @@ final class WhepPlayer: NSObject {
             return
         }
 
-        guard let peerConnection, peerConnection.iceGatheringState == .complete else {
+        guard let peerConnection else {
             return
         }
 
@@ -159,12 +159,13 @@ final class WhepPlayer: NSObject {
     }
 
     private func setRemoteAnswer(_ answerSDP: String) {
-        guard answerSDP.hasPrefix("v=0") else {
-            fail(WhepRuntimeError.message("Invalid WHEP answer SDP: \(String(answerSDP.prefix(120)))"))
+        let validation = validateAnswerSDP(answerSDP)
+        guard validation.isValid else {
+            fail(WhepRuntimeError.message("Invalid WHEP answer SDP: \(validation.summary)"))
             return
         }
 
-        notifyStatus("Applying WHEP answer")
+        notifyStatus("Applying WHEP answer: \(validation.summary)")
         let answer = RTCSessionDescription(type: .answer, sdp: answerSDP)
         peerConnection?.setRemoteDescription(answer) { [weak self] error in
             guard let self else {
@@ -173,7 +174,7 @@ final class WhepPlayer: NSObject {
 
             self.workerQueue.async {
                 if let error {
-                    self.fail(error)
+                    self.fail(WhepRuntimeError.message("setRemoteDescription failed: \(error.localizedDescription). Answer: \(validation.summary)"))
                     return
                 }
 
@@ -226,6 +227,24 @@ final class WhepPlayer: NSObject {
         DispatchQueue.main.async {
             self.delegate?.whepPlayer(self, didFailWith: error)
         }
+    }
+
+    private func validateAnswerSDP(_ answerSDP: String) -> (isValid: Bool, summary: String) {
+        let lines = answerSDP.split(separator: "\n", omittingEmptySubsequences: true)
+        let mediaLines = lines.filter { $0.hasPrefix("m=") }.map(String.init)
+        let hasIceUfrag = lines.contains { $0.hasPrefix("a=ice-ufrag:") }
+        let hasFingerprint = lines.contains { $0.hasPrefix("a=fingerprint:") }
+        let hasSetup = lines.contains { $0.hasPrefix("a=setup:") }
+        let firstLines = lines.prefix(5).joined(separator: " | ")
+        let summary = "len=\(answerSDP.count), media=\(mediaLines.joined(separator: ",")), ice=\(hasIceUfrag), fingerprint=\(hasFingerprint), setup=\(hasSetup), head=\(firstLines)"
+
+        let isValid = answerSDP.hasPrefix("v=0")
+            && !mediaLines.isEmpty
+            && hasIceUfrag
+            && hasFingerprint
+            && hasSetup
+
+        return (isValid, summary)
     }
 }
 
