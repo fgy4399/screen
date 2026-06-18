@@ -23,8 +23,12 @@ final class WhepPlayer: NSObject {
     private var lastAnswerSDP: String?
     private var lastSanitizedAnswerSDP: String?
     private var lastSanitizationMode: String?
+    private var localCandidates: [RTCIceCandidate] = []
+    private var debugEvents: [String] = []
     private var pendingRemoteCandidates: [RTCIceCandidate] = []
     private var hasPostedOffer = false
+    private var shouldPostOfferWhenIceReady = false
+    private var didHitLocalIceTimeout = false
 
     init(videoRenderer: RTCVideoRenderer) {
         self.videoRenderer = videoRenderer
@@ -40,6 +44,8 @@ final class WhepPlayer: NSObject {
             self.stopInternal(notify: false)
             self.client = WhepClient(endpoint: endpoint)
             self.hasPostedOffer = false
+            self.shouldPostOfferWhenIceReady = false
+            self.didHitLocalIceTimeout = false
             self.notifyStatus("Creating peer connection")
 
             guard let peerConnection = self.makePeerConnection() else {
@@ -123,8 +129,9 @@ final class WhepPlayer: NSObject {
                             return
                         }
 
-                        self.notifyStatus("Posting initial WHEP offer")
-                        self.postOfferIfReady()
+                        self.shouldPostOfferWhenIceReady = true
+                        self.notifyStatus("Gathering local ICE candidates")
+                        self.postOfferAfterIceTimeout()
                     }
                 }
             }
@@ -144,12 +151,21 @@ final class WhepPlayer: NSObject {
             return
         }
 
+        let usableLocalCandidates = localCandidates.filter { isUsableCandidate($0.sdp) }
+        guard peerConnection.iceGatheringState == .complete || !usableLocalCandidates.isEmpty || didHitLocalIceTimeout else {
+            shouldPostOfferWhenIceReady = true
+            notifyStatus("Waiting for local ICE candidates")
+            return
+        }
+
         hasPostedOffer = true
-        lastOfferSDP = localDescription.sdp
+        shouldPostOfferWhenIceReady = false
+        let offerSDP = injectLocalCandidates(usableLocalCandidates, into: localDescription.sdp)
+        lastOfferSDP = offerSDP
         publishDebugInfo(extra: "Posting WHEP offer")
         notifyStatus("Posting WHEP offer")
 
-        client?.createSession(offerSDP: localDescription.sdp) { [weak self] result in
+        client?.createSession(offerSDP: offerSDP) { [weak self] result in
             guard let self else {
                 return
             }
@@ -231,8 +247,12 @@ final class WhepPlayer: NSObject {
         lastAnswerSDP = nil
         lastSanitizedAnswerSDP = nil
         lastSanitizationMode = nil
+        localCandidates = []
+        debugEvents = []
         pendingRemoteCandidates = []
         hasPostedOffer = false
+        shouldPostOfferWhenIceReady = false
+        didHitLocalIceTimeout = false
         remoteVideoTrack?.remove(videoRenderer)
         remoteVideoTrack = nil
         peerConnection?.close()
@@ -275,8 +295,15 @@ final class WhepPlayer: NSObject {
         let candidates = pendingRemoteCandidates
             .map { "mid=\($0.sdpMid ?? "<nil>") index=\($0.sdpMLineIndex) sdp=\($0.sdp)" }
             .joined(separator: "\n")
+        let localCandidateLines = localCandidates
+            .map { "mid=\($0.sdpMid ?? "<nil>") index=\($0.sdpMLineIndex) sdp=\($0.sdp)" }
+            .joined(separator: "\n")
+        let events = debugEvents.joined(separator: "\n")
         let debugInfo = """
         \(extra)
+
+        === Events ===
+        \(events.isEmpty ? "<none>" : events)
 
         === Local offer SDP ===
         \(lastOfferSDP ?? "<nil>")
@@ -290,11 +317,24 @@ final class WhepPlayer: NSObject {
 
         === Pending remote candidates ===
         \(candidates.isEmpty ? "<none>" : candidates)
+
+        === Local candidates ===
+        \(localCandidateLines.isEmpty ? "<none>" : localCandidateLines)
         """
 
         DispatchQueue.main.async {
             self.delegate?.whepPlayer(self, didUpdateDebugInfo: debugInfo)
         }
+    }
+
+    private func recordDebugEvent(_ event: String) {
+        let timestamp = DateFormatter.debugTimestamp.string(from: Date())
+        debugEvents.append("[\(timestamp)] \(event)")
+        if debugEvents.count > 80 {
+            debugEvents.removeFirst(debugEvents.count - 80)
+        }
+
+        publishDebugInfo(extra: event)
     }
 
     private func describe(_ error: Error) -> String {
@@ -336,6 +376,69 @@ final class WhepPlayer: NSObject {
         sdp
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
+    }
+
+    private func postOfferAfterIceTimeout() {
+        workerQueue.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self,
+                  self.shouldPostOfferWhenIceReady,
+                  !self.hasPostedOffer else {
+                return
+            }
+
+            self.didHitLocalIceTimeout = true
+            self.recordDebugEvent("Local ICE timeout; posting offer with \(self.localCandidates.count) candidates")
+            self.postOfferIfReady()
+        }
+    }
+
+    private func injectLocalCandidates(_ candidates: [RTCIceCandidate], into sdp: String) -> String {
+        let normalizedSDP = normalizeSDPForValidation(sdp)
+        let candidateLinesByMid = Dictionary(grouping: candidates, by: { $0.sdpMid ?? "" })
+        var answerLines: [String] = []
+        var currentMid = ""
+        var insertedMids = Set<String>()
+
+        for rawLine in normalizedSDP.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
+            let line = rawLine.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+            guard !line.isEmpty else {
+                continue
+            }
+
+            if line.hasPrefix("m="), !currentMid.isEmpty {
+                appendLocalCandidates(candidateLinesByMid[currentMid] ?? [], to: &answerLines)
+                insertedMids.insert(currentMid)
+                currentMid = ""
+            }
+
+            answerLines.append(line)
+
+            if line.hasPrefix("a=mid:") {
+                currentMid = String(line.dropFirst("a=mid:".count))
+            }
+        }
+
+        if !currentMid.isEmpty, !insertedMids.contains(currentMid) {
+            appendLocalCandidates(candidateLinesByMid[currentMid] ?? [], to: &answerLines)
+            insertedMids.insert(currentMid)
+        }
+
+        let candidatesWithoutMid = candidateLinesByMid[""] ?? []
+        appendLocalCandidates(candidatesWithoutMid, to: &answerLines)
+
+        return answerLines.joined(separator: "\r\n") + "\r\n"
+    }
+
+    private func appendLocalCandidates(_ candidates: [RTCIceCandidate], to lines: inout [String]) {
+        var appendedCandidate = false
+        for candidate in candidates where isRtpCandidate(candidate.sdp) && !isLoopbackOrDockerCandidate(candidate.sdp) {
+            lines.append("a=\(candidate.sdp)")
+            appendedCandidate = true
+        }
+
+        if appendedCandidate {
+            lines.append("a=end-of-candidates")
+        }
     }
 
     private func sanitizedAnswerCandidates(from sdp: String) -> [SanitizedAnswer] {
@@ -380,7 +483,7 @@ final class WhepPlayer: NSObject {
 
             if line.hasPrefix("a=candidate:") {
                 let candidateSDP = String(line.dropFirst("a=".count))
-                guard isRtpCandidate(candidateSDP) else {
+                guard isUsableCandidate(candidateSDP) else {
                     continue
                 }
 
@@ -457,6 +560,32 @@ final class WhepPlayer: NSObject {
         return fields[1] == "1"
     }
 
+    private func isUsableCandidate(_ candidateSDP: String) -> Bool {
+        isRtpCandidate(candidateSDP) && !isLoopbackOrDockerCandidate(candidateSDP)
+    }
+
+    private func isLoopbackOrDockerCandidate(_ candidateSDP: String) -> Bool {
+        guard let host = candidateHost(from: candidateSDP) else {
+            return false
+        }
+
+        return host == "127.0.0.1"
+            || host == "::1"
+            || host.hasPrefix("172.17.")
+            || host.hasPrefix("172.18.")
+            || host.hasPrefix("172.19.")
+            || host.hasPrefix("172.20.")
+    }
+
+    private func candidateHost(from candidateSDP: String) -> String? {
+        let fields = candidateSDP.split(separator: " ").map(String.init)
+        guard fields.count > 4 else {
+            return nil
+        }
+
+        return fields[4]
+    }
+
     private func addPendingRemoteCandidates() {
         guard let peerConnection else {
             return
@@ -464,11 +593,15 @@ final class WhepPlayer: NSObject {
 
         for candidate in pendingRemoteCandidates {
             peerConnection.add(candidate) { [weak self] error in
-                guard let self, let error else {
+                guard let self else {
                     return
                 }
 
-                self.fail(WhepRuntimeError.message("addIceCandidate failed: \(self.describe(error))"))
+                if let error {
+                    self.fail(WhepRuntimeError.message("addIceCandidate failed: \(self.describe(error))"))
+                } else {
+                    self.recordDebugEvent("Added remote ICE candidate: \(candidate.sdp)")
+                }
             }
         }
     }
@@ -477,7 +610,10 @@ final class WhepPlayer: NSObject {
 
 extension WhepPlayer: RTCPeerConnectionDelegate {
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCSignalingState) {
-        notifyStatus("Signaling: \(stateChanged)")
+        workerQueue.async {
+            self.recordDebugEvent("Signaling changed: \(stateChanged)")
+            self.notifyStatus("Signaling: \(stateChanged)")
+        }
     }
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didAdd stream: RTCMediaStream) {
@@ -491,24 +627,61 @@ extension WhepPlayer: RTCPeerConnectionDelegate {
     func peerConnectionShouldNegotiate(_ peerConnection: RTCPeerConnection) {}
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
-        notifyStatus("ICE: \(newState)")
+        workerQueue.async {
+            self.recordDebugEvent("ICE connection changed: \(newState)")
+            self.notifyStatus("ICE: \(newState)")
+
+            if newState == .failed || newState == .disconnected {
+                self.publishDebugInfo(extra: "ICE connection \(newState)")
+                self.fail(WhepRuntimeError.message("ICE connection \(newState). Debug copied. Check MediaMTX UDP 8189 reachability and candidates."))
+            }
+        }
     }
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {
-        notifyStatus("ICE gathering: \(newState)")
+        workerQueue.async {
+            self.recordDebugEvent("ICE gathering changed: \(newState)")
+            self.notifyStatus("ICE gathering: \(newState)")
 
-        if newState == .complete {
-            workerQueue.async {
+            if newState == .complete, self.shouldPostOfferWhenIceReady {
                 self.postOfferIfReady()
             }
         }
     }
 
-    func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {}
+    func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {
+        workerQueue.async {
+            self.recordDebugEvent("Generated local ICE candidate: \(candidate.sdp)")
+            guard self.isRtpCandidate(candidate.sdp) else {
+                return
+            }
+
+            self.localCandidates.append(candidate)
+        }
+    }
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didRemove candidates: [RTCIceCandidate]) {}
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {}
+
+    func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCPeerConnectionState) {
+        workerQueue.async {
+            self.recordDebugEvent("Peer connection changed: \(newState)")
+            self.notifyStatus("Peer: \(newState)")
+        }
+    }
+
+    func peerConnection(_ peerConnection: RTCPeerConnection, didChangeLocalCandidate local: RTCIceCandidate, remoteCandidate remote: RTCIceCandidate, lastReceivedMs: Int32, changeReason reason: String) {
+        workerQueue.async {
+            self.recordDebugEvent("Selected ICE pair: local=\(local.sdp) remote=\(remote.sdp) lastReceivedMs=\(lastReceivedMs) reason=\(reason)")
+        }
+    }
+
+    func peerConnection(_ peerConnection: RTCPeerConnection, didFailToGather candidate: RTCIceCandidateErrorEvent) {
+        workerQueue.async {
+            self.recordDebugEvent("Local ICE gather failed: url=\(candidate.url) address=\(candidate.address):\(candidate.port) code=\(candidate.errorCode) text=\(candidate.errorText)")
+        }
+    }
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didAdd rtpReceiver: RTCRtpReceiver, streams: [RTCMediaStream]) {
         workerQueue.async {
@@ -542,4 +715,12 @@ private enum WhepRuntimeError: LocalizedError {
             return message
         }
     }
+}
+
+private extension DateFormatter {
+    static let debugTimestamp: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        return formatter
+    }()
 }
