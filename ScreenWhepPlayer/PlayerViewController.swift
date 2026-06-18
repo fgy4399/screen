@@ -31,11 +31,11 @@ final class PlayerViewController: UIViewController {
         panel.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(panel)
 
-        configureTextField(urlField, placeholder: "http://192.168.1.10:8889/mystream/whep")
+        configureTextField(urlField, placeholder: "http://192.168.1.10:8889/mystream")
         urlField.keyboardType = .URL
         urlField.autocapitalizationType = .none
         urlField.autocorrectionType = .no
-        urlField.text = "http://127.0.0.1:8889/mystream/whep"
+        urlField.text = "http://127.0.0.1:8889/mystream"
 
         configureTextField(tokenField, placeholder: "Bearer token (optional)")
         tokenField.autocapitalizationType = .none
@@ -103,16 +103,35 @@ final class PlayerViewController: UIViewController {
 
     @objc private func startTapped() {
         guard let text = urlField.text?.trimmingCharacters(in: .whitespacesAndNewlines),
-              let url = URL(string: text),
-              let scheme = url.scheme,
+              let inputURL = URL(string: text),
+              let scheme = inputURL.scheme,
               ["http", "https"].contains(scheme.lowercased()) else {
-            statusLabel.text = "Invalid WHEP URL"
+            statusLabel.text = "Invalid MediaMTX URL"
             return
         }
+
+        let url = normalizedWhepURL(from: inputURL)
+        urlField.text = url.absoluteString
+        statusLabel.text = "Using WHEP: \(url.absoluteString)"
 
         let token = tokenField.text?.trimmingCharacters(in: .whitespacesAndNewlines)
         let endpoint = WhepEndpoint(url: url, bearerToken: token?.isEmpty == false ? token : nil)
         player.start(endpoint: endpoint)
+    }
+
+    private func normalizedWhepURL(from inputURL: URL) -> URL {
+        guard var components = URLComponents(url: inputURL, resolvingAgainstBaseURL: false) else {
+            return inputURL
+        }
+
+        var pathParts = components.path.split(separator: "/").map(String.init)
+        if pathParts.last == "whip" || pathParts.last == "whep" {
+            pathParts.removeLast()
+        }
+
+        pathParts.append("whep")
+        components.path = "/" + pathParts.joined(separator: "/")
+        return components.url ?? inputURL
     }
 
     @objc private func stopTapped() {

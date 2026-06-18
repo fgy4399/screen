@@ -15,11 +15,13 @@ Native iOS/iPadOS 14+ player prototype for MediaMTX WHEP streams.
 
 1. Open `ScreenWhepPlayer.xcodeproj` in Xcode 16+.
 2. Select a simulator or real iPad target.
-3. Enter a MediaMTX WHEP URL such as:
+3. Enter a MediaMTX stream URL such as:
 
    ```text
-   http://192.168.1.10:8889/mystream/whep
+   http://192.168.1.10:8889/mystream
    ```
+
+   The app also accepts `http://192.168.1.10:8889/mystream/whip` or `http://192.168.1.10:8889/mystream/whep` and normalizes them to the WHEP playback endpoint.
 
 4. Tap `Start`.
 
@@ -55,6 +57,8 @@ Optional repository secrets:
 
 ## MediaMTX notes
 
+- OBS publishes with `http://192.168.1.10:8889/mystream/whip`.
+- This app plays with `http://192.168.1.10:8889/mystream/whep`. The browser page `http://192.168.1.10:8889/mystream` is not the native WHEP API endpoint.
 - Keep the source stream WebRTC-friendly. Start with H264 without B-frames and Opus/AAC where possible.
 - If the iPad is not on the same LAN as MediaMTX, configure `webrtcAdditionalHosts` and STUN/TURN in MediaMTX.
 - This prototype intentionally uses non-trickle ICE for simpler first-pass compatibility. Add WHEP `PATCH application/trickle-ice-sdpfrag` later if connection setup latency matters.
