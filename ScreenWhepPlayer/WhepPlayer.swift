@@ -42,6 +42,7 @@ final class WhepPlayer: NSObject {
             }
 
             self.peerConnection = peerConnection
+            self.addReceiveOnlyTransceivers(to: peerConnection)
             self.createOffer(on: peerConnection)
         }
     }
@@ -54,7 +55,7 @@ final class WhepPlayer: NSObject {
 
     private func makePeerConnection() -> RTCPeerConnection? {
         let config = RTCConfiguration()
-        config.sdpSemantics = .planB
+        config.sdpSemantics = .unifiedPlan
         config.continualGatheringPolicy = .gatherOnce
         config.iceServers = [
             RTCIceServer(urlStrings: ["stun:stun.l.google.com:19302"])
@@ -66,6 +67,16 @@ final class WhepPlayer: NSObject {
         )
 
         return factory.peerConnection(with: config, constraints: constraints, delegate: self)
+    }
+
+    private func addReceiveOnlyTransceivers(to peerConnection: RTCPeerConnection) {
+        let videoInit = RTCRtpTransceiverInit()
+        videoInit.direction = .recvOnly
+        _ = peerConnection.addTransceiver(of: .video, init: videoInit)
+
+        let audioInit = RTCRtpTransceiverInit()
+        audioInit.direction = .recvOnly
+        _ = peerConnection.addTransceiver(of: .audio, init: audioInit)
     }
 
     private func createOffer(on peerConnection: RTCPeerConnection) {
@@ -148,7 +159,7 @@ final class WhepPlayer: NSObject {
     }
 
     private func setRemoteAnswer(_ answerSDP: String) {
-        let validationSDP = normalizeSDPForValidation(answerSDP)
+        let validationSDP = sanitizeAnswerSDP(normalizeSDPForValidation(answerSDP))
         let validation = validateAnswerSDP(validationSDP)
         guard validation.isValid else {
             fail(WhepRuntimeError.message("Invalid WHEP answer SDP: \(validation.summary)"))
@@ -241,6 +252,17 @@ final class WhepPlayer: NSObject {
         sdp
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
+    }
+
+    private func sanitizeAnswerSDP(_ sdp: String) -> String {
+        sdp
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+            .filter { line in
+                !line.hasPrefix("a=extmap-allow-mixed")
+                    && !line.hasPrefix("a=extmap:")
+            }
+            .joined(separator: "\n")
     }
 
 }
