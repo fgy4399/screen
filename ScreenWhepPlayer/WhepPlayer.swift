@@ -302,11 +302,28 @@ final class WhepPlayer: NSObject {
         sdp
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map(String.init)
+            .map(normalizeAnswerLine)
             .filter { line in
                 !line.hasPrefix("a=extmap-allow-mixed")
                     && !line.hasPrefix("a=extmap:")
             }
             .joined(separator: "\n")
+    }
+
+    private func normalizeAnswerLine(_ line: String) -> String {
+        if line.hasPrefix("a=msid-semantic:WMS") {
+            return line.replacingOccurrences(of: "a=msid-semantic:WMS", with: "a=msid-semantic: WMS")
+        }
+
+        guard line.hasPrefix("a=candidate:") else {
+            return line
+        }
+
+        guard let range = line.range(of: " ufrag ") else {
+            return line
+        }
+
+        return String(line[..<range.lowerBound])
     }
 
 }
