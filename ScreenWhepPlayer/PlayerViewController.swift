@@ -44,11 +44,11 @@ final class PlayerViewController: UIViewController {
         panel.translatesAutoresizingMaskIntoConstraints = false
         scrollView.addSubview(panel)
 
-        configureTextField(urlField, placeholder: "http://192.168.1.10:8889/mystream")
+        configureTextField(urlField, placeholder: "http://192.168.5.110:8889/screen")
         urlField.keyboardType = .URL
         urlField.autocapitalizationType = .none
         urlField.autocorrectionType = .no
-        urlField.text = "http://127.0.0.1:8889/mystream"
+        urlField.text = "http://192.168.5.110:8889/screen"
 
         configureTextField(tokenField, placeholder: "Bearer token (optional)")
         tokenField.autocapitalizationType = .none
