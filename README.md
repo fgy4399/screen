@@ -34,10 +34,10 @@ Native iOS/iPadOS 14+ player prototype for MediaMTX WHEP streams.
 The workflow in `.github/workflows/ios.yml` has three jobs:
 
 - `simulator-build` runs on every push and pull request. It builds an unsigned simulator `.app` and uploads `ScreenWhepPlayer-simulator.zip`. This artifact is for CI smoke testing only and cannot be installed on a real iPad.
-- `unsigned-device-ipa` runs only from manual `workflow_dispatch`. It builds an unsigned real-device `.ipa` with `Payload/ScreenWhepPlayer.app`, suitable for TrollStore or later local/self-signing.
+- `unsigned-device-ipa` runs on push, pull request, and manual `workflow_dispatch`. It builds an unsigned real-device `.ipa` with `Payload/ScreenWhepPlayer.app`, suitable for TrollStore or later local/self-signing.
 - `signed-ipa` runs only from manual `workflow_dispatch`. It archives and exports a real installable IPA when Apple signing secrets are configured.
 
-For TrollStore-style installation, run the workflow manually and download `ScreenWhepPlayer-unsigned-ipa`. You can optionally set `bundle_id` in the workflow inputs; keep it stable between builds if you want upgrades to replace the same installed app. Leave `build_signed_ipa` as `false` unless you also want to run the Apple-signed export job.
+For TrollStore-style installation, download `ScreenWhepPlayer-unsigned-ipa` from the workflow run artifacts. If you run the workflow manually, you can optionally set `bundle_id`; keep it stable between builds if you want upgrades to replace the same installed app. Leave `build_signed_ipa` as `false` unless you also want to run the Apple-signed export job.
 
 Required repository secrets for `signed-ipa`:
 

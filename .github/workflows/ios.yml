@@ -80,7 +80,6 @@ jobs:
   unsigned-device-ipa:
     name: Unsigned Device IPA
     runs-on: macos-15
-    if: github.event_name == 'workflow_dispatch'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -96,7 +95,7 @@ jobs:
 
       - name: Build unsigned device app
         env:
-          WORKFLOW_BUNDLE_ID: ${{ inputs.bundle_id }}
+          WORKFLOW_BUNDLE_ID: ${{ github.event.inputs.bundle_id }}
         run: |
           BUNDLE_ID="${WORKFLOW_BUNDLE_ID:-$APP_BUNDLE_ID}"
           set -o pipefail
