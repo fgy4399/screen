@@ -22,6 +22,7 @@ final class WhepPlayer: NSObject {
     private var lastOfferSDP: String?
     private var lastAnswerSDP: String?
     private var lastSanitizedAnswerSDP: String?
+    private var pendingRemoteCandidates: [RTCIceCandidate] = []
     private var hasPostedOffer = false
 
     init(videoRenderer: RTCVideoRenderer) {
@@ -166,7 +167,9 @@ final class WhepPlayer: NSObject {
 
     private func setRemoteAnswer(_ answerSDP: String) {
         lastAnswerSDP = answerSDP
-        let validationSDP = sanitizeAnswerSDP(normalizeSDPForValidation(answerSDP))
+        let sanitized = sanitizeAnswerSDP(normalizeSDPForValidation(answerSDP))
+        let validationSDP = sanitized.sdp
+        pendingRemoteCandidates = sanitized.candidates
         lastSanitizedAnswerSDP = validationSDP
         publishDebugInfo(extra: "Received WHEP answer")
 
@@ -191,6 +194,7 @@ final class WhepPlayer: NSObject {
                     return
                 }
 
+                self.addPendingRemoteCandidates()
                 self.notifyStatus("Connecting")
             }
         }
@@ -206,6 +210,7 @@ final class WhepPlayer: NSObject {
         lastOfferSDP = nil
         lastAnswerSDP = nil
         lastSanitizedAnswerSDP = nil
+        pendingRemoteCandidates = []
         hasPostedOffer = false
         remoteVideoTrack?.remove(videoRenderer)
         remoteVideoTrack = nil
@@ -246,6 +251,9 @@ final class WhepPlayer: NSObject {
     }
 
     private func publishDebugInfo(extra: String) {
+        let candidates = pendingRemoteCandidates
+            .map { "mid=\($0.sdpMid ?? "<nil>") index=\($0.sdpMLineIndex) sdp=\($0.sdp)" }
+            .joined(separator: "\n")
         let debugInfo = """
         \(extra)
 
@@ -257,6 +265,9 @@ final class WhepPlayer: NSObject {
 
         === Sanitized remote answer SDP ===
         \(lastSanitizedAnswerSDP ?? "<nil>")
+
+        === Pending remote candidates ===
+        \(candidates.isEmpty ? "<none>" : candidates)
         """
 
         DispatchQueue.main.async {
@@ -298,16 +309,47 @@ final class WhepPlayer: NSObject {
             .replacingOccurrences(of: "\r", with: "\n")
     }
 
-    private func sanitizeAnswerSDP(_ sdp: String) -> String {
-        sdp
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .map(String.init)
-            .map(normalizeAnswerLine)
-            .filter { line in
-                !line.hasPrefix("a=extmap-allow-mixed")
-                    && !line.hasPrefix("a=extmap:")
+    private func sanitizeAnswerSDP(_ sdp: String) -> (sdp: String, candidates: [RTCIceCandidate]) {
+        var currentMid: String?
+        var currentMLineIndex: Int32 = -1
+        var candidates: [RTCIceCandidate] = []
+        var answerLines: [String] = []
+
+        for rawLine in sdp.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
+            let line = normalizeAnswerLine(rawLine)
+
+            if line.hasPrefix("m=") {
+                currentMLineIndex += 1
+                answerLines.append(line)
+                continue
             }
-            .joined(separator: "\n")
+
+            if line.hasPrefix("a=mid:") {
+                currentMid = String(line.dropFirst("a=mid:".count))
+                answerLines.append(line)
+                continue
+            }
+
+            if line.hasPrefix("a=candidate:") {
+                let candidateSDP = String(line.dropFirst("a=".count))
+                candidates.append(RTCIceCandidate(
+                    sdp: candidateSDP,
+                    sdpMLineIndex: currentMLineIndex,
+                    sdpMid: currentMid
+                ))
+                continue
+            }
+
+            if line.hasPrefix("a=end-of-candidates")
+                || line.hasPrefix("a=extmap-allow-mixed")
+                || line.hasPrefix("a=extmap:") {
+                continue
+            }
+
+            answerLines.append(line)
+        }
+
+        return (answerLines.joined(separator: "\n"), candidates)
     }
 
     private func normalizeAnswerLine(_ line: String) -> String {
@@ -324,6 +366,22 @@ final class WhepPlayer: NSObject {
         }
 
         return String(line[..<range.lowerBound])
+    }
+
+    private func addPendingRemoteCandidates() {
+        guard let peerConnection else {
+            return
+        }
+
+        for candidate in pendingRemoteCandidates {
+            peerConnection.add(candidate) { [weak self] error in
+                guard let self, let error else {
+                    return
+                }
+
+                self.fail(WhepRuntimeError.message("addIceCandidate failed: \(self.describe(error))"))
+            }
+        }
     }
 
 }
