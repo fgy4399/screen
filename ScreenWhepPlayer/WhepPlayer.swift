@@ -159,14 +159,15 @@ final class WhepPlayer: NSObject {
     }
 
     private func setRemoteAnswer(_ answerSDP: String) {
-        let validation = validateAnswerSDP(answerSDP)
+        let normalizedAnswerSDP = normalizeSDP(answerSDP)
+        let validation = validateAnswerSDP(normalizedAnswerSDP)
         guard validation.isValid else {
             fail(WhepRuntimeError.message("Invalid WHEP answer SDP: \(validation.summary)"))
             return
         }
 
         notifyStatus("Applying WHEP answer: \(validation.summary)")
-        let answer = RTCSessionDescription(type: .answer, sdp: answerSDP)
+        let answer = RTCSessionDescription(type: .answer, sdp: normalizedAnswerSDP)
         peerConnection?.setRemoteDescription(answer) { [weak self] error in
             guard let self else {
                 return
@@ -245,6 +246,12 @@ final class WhepPlayer: NSObject {
             && hasSetup
 
         return (isValid, summary)
+    }
+
+    private func normalizeSDP(_ sdp: String) -> String {
+        sdp
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
     }
 }
 

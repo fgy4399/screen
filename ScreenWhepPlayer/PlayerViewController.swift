@@ -10,6 +10,7 @@ final class PlayerViewController: UIViewController {
     private let startButton = UIButton(type: .system)
     private let stopButton = UIButton(type: .system)
     private let statusLabel = UILabel()
+    private var videoHeightConstraint: NSLayoutConstraint?
 
     private lazy var player = WhepPlayer(videoRenderer: videoView)
 
@@ -75,11 +76,14 @@ final class PlayerViewController: UIViewController {
         panel.addArrangedSubview(buttonRow)
         panel.addArrangedSubview(statusLabel)
 
+        let videoHeightConstraint = videoView.heightAnchor.constraint(equalTo: view.heightAnchor, multiplier: 0.62)
+        self.videoHeightConstraint = videoHeightConstraint
+
         NSLayoutConstraint.activate([
             videoView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             videoView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             videoView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            videoView.heightAnchor.constraint(equalTo: view.heightAnchor, multiplier: 0.62),
+            videoHeightConstraint,
 
             scrollView.topAnchor.constraint(equalTo: videoView.bottomAnchor),
             scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -160,11 +164,13 @@ final class PlayerViewController: UIViewController {
         let keyboardFrame = view.convert(endFrame, from: nil)
         let overlap = max(0, view.bounds.maxY - keyboardFrame.minY)
         updateScrollInsets(bottom: overlap)
+        updateVideoHeightForKeyboard(isVisible: overlap > 0)
         scrollActiveFieldIntoView()
     }
 
     @objc private func keyboardWillHide(_ notification: Notification) {
         updateScrollInsets(bottom: 0)
+        updateVideoHeightForKeyboard(isVisible: false)
     }
 
     private func updateScrollInsets(bottom: CGFloat) {
@@ -180,6 +186,18 @@ final class PlayerViewController: UIViewController {
 
         let fieldFrame = activeField.convert(activeField.bounds, to: scrollView)
         scrollView.scrollRectToVisible(fieldFrame.insetBy(dx: 0, dy: -20), animated: true)
+    }
+
+    private func updateVideoHeightForKeyboard(isVisible: Bool) {
+        videoHeightConstraint?.isActive = false
+        let multiplier: CGFloat = isVisible ? 0.22 : 0.62
+        let constraint = videoView.heightAnchor.constraint(equalTo: view.heightAnchor, multiplier: multiplier)
+        constraint.isActive = true
+        videoHeightConstraint = constraint
+
+        UIView.animate(withDuration: 0.25) {
+            self.view.layoutIfNeeded()
+        }
     }
 
     @objc private func dismissKeyboard() {
