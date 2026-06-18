@@ -258,6 +258,7 @@ extension PlayerViewController: WhepPlayerDelegate {
 
     func whepPlayer(_ player: WhepPlayer, didUpdateDebugInfo debugInfo: String) {
         lastDebugInfo = debugInfo
+        UIPasteboard.general.string = debugInfo
     }
 }
 
