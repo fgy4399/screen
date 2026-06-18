@@ -29,6 +29,7 @@ final class WhepPlayer: NSObject {
     private var hasPostedOffer = false
     private var shouldPostOfferWhenIceReady = false
     private var didHitLocalIceTimeout = false
+    private var connectionAttemptID = 0
 
     init(videoRenderer: RTCVideoRenderer) {
         self.videoRenderer = videoRenderer
@@ -46,6 +47,7 @@ final class WhepPlayer: NSObject {
             self.hasPostedOffer = false
             self.shouldPostOfferWhenIceReady = false
             self.didHitLocalIceTimeout = false
+            self.connectionAttemptID += 1
             self.notifyStatus("Creating peer connection")
 
             guard let peerConnection = self.makePeerConnection() else {
@@ -160,7 +162,7 @@ final class WhepPlayer: NSObject {
 
         hasPostedOffer = true
         shouldPostOfferWhenIceReady = false
-        let offerSDP = injectLocalCandidates(usableLocalCandidates, into: localDescription.sdp)
+        let offerSDP = prepareOfferSDP(localDescription.sdp, candidates: usableLocalCandidates)
         lastOfferSDP = offerSDP
         publishDebugInfo(extra: "Posting WHEP offer")
         notifyStatus("Posting WHEP offer")
@@ -230,7 +232,10 @@ final class WhepPlayer: NSObject {
                     return
                 }
 
+                self.recordDebugEvent("Applied remote description")
                 self.addPendingRemoteCandidates()
+                self.scheduleConnectionTimeout()
+                self.publishDebugInfo(extra: "Connecting after applying WHEP answer")
                 self.notifyStatus("Connecting")
             }
         }
@@ -253,6 +258,7 @@ final class WhepPlayer: NSObject {
         hasPostedOffer = false
         shouldPostOfferWhenIceReady = false
         didHitLocalIceTimeout = false
+        connectionAttemptID += 1
         remoteVideoTrack?.remove(videoRenderer)
         remoteVideoTrack = nil
         peerConnection?.close()
@@ -276,6 +282,7 @@ final class WhepPlayer: NSObject {
         remoteVideoTrack?.remove(videoRenderer)
         remoteVideoTrack = videoTrack
         videoTrack.add(videoRenderer)
+        recordDebugEvent("Attached remote video track")
         notifyStatus("Receiving video")
     }
 
@@ -299,8 +306,12 @@ final class WhepPlayer: NSObject {
             .map { "mid=\($0.sdpMid ?? "<nil>") index=\($0.sdpMLineIndex) sdp=\($0.sdp)" }
             .joined(separator: "\n")
         let events = debugEvents.joined(separator: "\n")
+        let stateSummary = describeCurrentPeerConnectionState()
         let debugInfo = """
         \(extra)
+
+        === State ===
+        \(stateSummary)
 
         === Events ===
         \(events.isEmpty ? "<none>" : events)
@@ -345,6 +356,88 @@ final class WhepPlayer: NSObject {
             .joined(separator: ", ")
 
         return "domain=\(nsError.domain), code=\(nsError.code), description=\(nsError.localizedDescription), userInfo={\(userInfo)}"
+    }
+
+    private func describeCurrentPeerConnectionState() -> String {
+        guard let peerConnection else {
+            return "peer=<nil>"
+        }
+
+        return "signaling=\(describe(peerConnection.signalingState)), ice=\(describe(peerConnection.iceConnectionState)), peer=\(describe(peerConnection.connectionState)), gathering=\(describe(peerConnection.iceGatheringState)), remoteVideo=\(remoteVideoTrack != nil)"
+    }
+
+    private func describe(_ state: RTCSignalingState) -> String {
+        switch state {
+        case .stable:
+            return "stable"
+        case .haveLocalOffer:
+            return "have-local-offer"
+        case .haveLocalPrAnswer:
+            return "have-local-pranswer"
+        case .haveRemoteOffer:
+            return "have-remote-offer"
+        case .haveRemotePrAnswer:
+            return "have-remote-pranswer"
+        case .closed:
+            return "closed"
+        @unknown default:
+            return "unknown(\(state.rawValue))"
+        }
+    }
+
+    private func describe(_ state: RTCIceConnectionState) -> String {
+        switch state {
+        case .new:
+            return "new"
+        case .checking:
+            return "checking"
+        case .connected:
+            return "connected"
+        case .completed:
+            return "completed"
+        case .failed:
+            return "failed"
+        case .disconnected:
+            return "disconnected"
+        case .closed:
+            return "closed"
+        case .count:
+            return "count"
+        @unknown default:
+            return "unknown(\(state.rawValue))"
+        }
+    }
+
+    private func describe(_ state: RTCIceGatheringState) -> String {
+        switch state {
+        case .new:
+            return "new"
+        case .gathering:
+            return "gathering"
+        case .complete:
+            return "complete"
+        @unknown default:
+            return "unknown(\(state.rawValue))"
+        }
+    }
+
+    private func describe(_ state: RTCPeerConnectionState) -> String {
+        switch state {
+        case .new:
+            return "new"
+        case .connecting:
+            return "connecting"
+        case .connected:
+            return "connected"
+        case .disconnected:
+            return "disconnected"
+        case .failed:
+            return "failed"
+        case .closed:
+            return "closed"
+        @unknown default:
+            return "unknown(\(state.rawValue))"
+        }
     }
 
     private func isRemoteDescriptionParseFailure(_ error: Error) -> Bool {
@@ -392,10 +485,32 @@ final class WhepPlayer: NSObject {
         }
     }
 
-    private func injectLocalCandidates(_ candidates: [RTCIceCandidate], into sdp: String) -> String {
+    private func scheduleConnectionTimeout() {
+        let attemptID = connectionAttemptID
+        workerQueue.asyncAfter(deadline: .now() + 8) { [weak self] in
+            guard let self,
+                  self.connectionAttemptID == attemptID,
+                  let peerConnection = self.peerConnection,
+                  self.remoteVideoTrack == nil else {
+                return
+            }
+
+            let iceState = peerConnection.iceConnectionState
+            if iceState == .connected || iceState == .completed {
+                self.recordDebugEvent("Connection timeout skipped: ICE \(self.describe(iceState)) but no video yet")
+                return
+            }
+
+            self.recordDebugEvent("Connection timeout: \(self.describeCurrentPeerConnectionState())")
+            self.publishDebugInfo(extra: "Connection timeout")
+            self.fail(WhepRuntimeError.message("Connection timeout. Debug copied. Check MediaMTX UDP/TCP ICE reachability."))
+        }
+    }
+
+    private func prepareOfferSDP(_ sdp: String, candidates: [RTCIceCandidate]) -> String {
         let normalizedSDP = normalizeSDPForValidation(sdp)
-        let candidateLinesByMid = Dictionary(grouping: candidates, by: { $0.sdpMid ?? "" })
-        var answerLines: [String] = []
+        let candidateLinesByMid = Dictionary(grouping: uniqueCandidates(candidates), by: { $0.sdpMid ?? "" })
+        var offerLines: [String] = []
         var currentMid = ""
         var insertedMids = Set<String>()
 
@@ -405,13 +520,17 @@ final class WhepPlayer: NSObject {
                 continue
             }
 
+            if line.hasPrefix("a=candidate:") || line.hasPrefix("a=end-of-candidates") {
+                continue
+            }
+
             if line.hasPrefix("m="), !currentMid.isEmpty {
-                appendLocalCandidates(candidateLinesByMid[currentMid] ?? [], to: &answerLines)
+                appendLocalCandidates(candidateLinesByMid[currentMid] ?? [], to: &offerLines)
                 insertedMids.insert(currentMid)
                 currentMid = ""
             }
 
-            answerLines.append(line)
+            offerLines.append(line)
 
             if line.hasPrefix("a=mid:") {
                 currentMid = String(line.dropFirst("a=mid:".count))
@@ -419,14 +538,25 @@ final class WhepPlayer: NSObject {
         }
 
         if !currentMid.isEmpty, !insertedMids.contains(currentMid) {
-            appendLocalCandidates(candidateLinesByMid[currentMid] ?? [], to: &answerLines)
+            appendLocalCandidates(candidateLinesByMid[currentMid] ?? [], to: &offerLines)
             insertedMids.insert(currentMid)
         }
 
         let candidatesWithoutMid = candidateLinesByMid[""] ?? []
-        appendLocalCandidates(candidatesWithoutMid, to: &answerLines)
+        appendLocalCandidates(candidatesWithoutMid, to: &offerLines)
 
-        return answerLines.joined(separator: "\r\n") + "\r\n"
+        return offerLines.joined(separator: "\r\n") + "\r\n"
+    }
+
+    private func uniqueCandidates(_ candidates: [RTCIceCandidate]) -> [RTCIceCandidate] {
+        var seen = Set<String>()
+        var unique: [RTCIceCandidate] = []
+
+        for candidate in candidates where seen.insert(candidate.sdp).inserted {
+            unique.append(candidate)
+        }
+
+        return unique
     }
 
     private func appendLocalCandidates(_ candidates: [RTCIceCandidate], to lines: inout [String]) {
@@ -591,6 +721,11 @@ final class WhepPlayer: NSObject {
             return
         }
 
+        if pendingRemoteCandidates.isEmpty {
+            recordDebugEvent("No remote ICE candidates after filtering")
+            return
+        }
+
         for candidate in pendingRemoteCandidates {
             peerConnection.add(candidate) { [weak self] error in
                 guard let self else {
@@ -611,8 +746,9 @@ final class WhepPlayer: NSObject {
 extension WhepPlayer: RTCPeerConnectionDelegate {
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCSignalingState) {
         workerQueue.async {
-            self.recordDebugEvent("Signaling changed: \(stateChanged)")
-            self.notifyStatus("Signaling: \(stateChanged)")
+            let state = self.describe(stateChanged)
+            self.recordDebugEvent("Signaling changed: \(state)")
+            self.notifyStatus("Signaling: \(state)")
         }
     }
 
@@ -628,20 +764,22 @@ extension WhepPlayer: RTCPeerConnectionDelegate {
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
         workerQueue.async {
-            self.recordDebugEvent("ICE connection changed: \(newState)")
-            self.notifyStatus("ICE: \(newState)")
+            let state = self.describe(newState)
+            self.recordDebugEvent("ICE connection changed: \(state)")
+            self.notifyStatus("ICE: \(state)")
 
             if newState == .failed || newState == .disconnected {
-                self.publishDebugInfo(extra: "ICE connection \(newState)")
-                self.fail(WhepRuntimeError.message("ICE connection \(newState). Debug copied. Check MediaMTX UDP 8189 reachability and candidates."))
+                self.publishDebugInfo(extra: "ICE connection \(state)")
+                self.fail(WhepRuntimeError.message("ICE connection \(state). Debug copied. Check MediaMTX UDP 8189 reachability and candidates."))
             }
         }
     }
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {
         workerQueue.async {
-            self.recordDebugEvent("ICE gathering changed: \(newState)")
-            self.notifyStatus("ICE gathering: \(newState)")
+            let state = self.describe(newState)
+            self.recordDebugEvent("ICE gathering changed: \(state)")
+            self.notifyStatus("ICE gathering: \(state)")
 
             if newState == .complete, self.shouldPostOfferWhenIceReady {
                 self.postOfferIfReady()
@@ -666,8 +804,9 @@ extension WhepPlayer: RTCPeerConnectionDelegate {
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCPeerConnectionState) {
         workerQueue.async {
-            self.recordDebugEvent("Peer connection changed: \(newState)")
-            self.notifyStatus("Peer: \(newState)")
+            let state = self.describe(newState)
+            self.recordDebugEvent("Peer connection changed: \(state)")
+            self.notifyStatus("Peer: \(state)")
         }
     }
 
