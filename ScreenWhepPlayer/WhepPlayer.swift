@@ -22,6 +22,7 @@ final class WhepPlayer: NSObject {
     private var lastOfferSDP: String?
     private var lastAnswerSDP: String?
     private var lastSanitizedAnswerSDP: String?
+    private var lastSanitizationMode: String?
     private var pendingRemoteCandidates: [RTCIceCandidate] = []
     private var hasPostedOffer = false
 
@@ -167,11 +168,22 @@ final class WhepPlayer: NSObject {
 
     private func setRemoteAnswer(_ answerSDP: String) {
         lastAnswerSDP = answerSDP
-        let sanitized = sanitizeAnswerSDP(normalizeSDPForValidation(answerSDP))
+        let answers = sanitizedAnswerCandidates(from: normalizeSDPForValidation(answerSDP))
+        applyRemoteAnswer(answers, attemptIndex: 0)
+    }
+
+    private func applyRemoteAnswer(_ answers: [SanitizedAnswer], attemptIndex: Int) {
+        guard answers.indices.contains(attemptIndex) else {
+            fail(WhepRuntimeError.message("Invalid WHEP answer SDP: no usable sanitized answer variants."))
+            return
+        }
+
+        let sanitized = answers[attemptIndex]
         let validationSDP = sanitized.sdp
         pendingRemoteCandidates = sanitized.candidates
         lastSanitizedAnswerSDP = validationSDP
-        publishDebugInfo(extra: "Received WHEP answer")
+        lastSanitizationMode = sanitized.mode.rawValue
+        publishDebugInfo(extra: "Received WHEP answer, applying \(sanitized.mode.rawValue) SDP")
 
         let validation = validateAnswerSDP(validationSDP)
         guard validation.isValid else {
@@ -189,6 +201,14 @@ final class WhepPlayer: NSObject {
             self.workerQueue.async {
                 if let error {
                     let errorDetail = self.describe(error)
+                    let nextAttemptIndex = attemptIndex + 1
+                    if self.isRemoteDescriptionParseFailure(error),
+                       answers.indices.contains(nextAttemptIndex) {
+                        self.publishDebugInfo(extra: "setRemoteDescription failed with \(sanitized.mode.rawValue): \(errorDetail). Retrying.")
+                        self.applyRemoteAnswer(answers, attemptIndex: nextAttemptIndex)
+                        return
+                    }
+
                     self.publishDebugInfo(extra: "setRemoteDescription failed: \(errorDetail)")
                     self.fail(WhepRuntimeError.message("setRemoteDescription failed: \(errorDetail). Debug copied. Answer: \(validation.summary)"))
                     return
@@ -210,6 +230,7 @@ final class WhepPlayer: NSObject {
         lastOfferSDP = nil
         lastAnswerSDP = nil
         lastSanitizedAnswerSDP = nil
+        lastSanitizationMode = nil
         pendingRemoteCandidates = []
         hasPostedOffer = false
         remoteVideoTrack?.remove(videoRenderer)
@@ -264,6 +285,7 @@ final class WhepPlayer: NSObject {
         \(lastAnswerSDP ?? "<nil>")
 
         === Sanitized remote answer SDP ===
+        mode=\(lastSanitizationMode ?? "<nil>")
         \(lastSanitizedAnswerSDP ?? "<nil>")
 
         === Pending remote candidates ===
@@ -283,6 +305,13 @@ final class WhepPlayer: NSObject {
             .joined(separator: ", ")
 
         return "domain=\(nsError.domain), code=\(nsError.code), description=\(nsError.localizedDescription), userInfo={\(userInfo)}"
+    }
+
+    private func isRemoteDescriptionParseFailure(_ error: Error) -> Bool {
+        let detail = describe(error).lowercased()
+        return detail.contains("sessiondescription is null")
+            || detail.contains("parse")
+            || detail.contains("sdp")
     }
 
     private func validateAnswerSDP(_ answerSDP: String) -> (isValid: Bool, summary: String) {
@@ -309,7 +338,23 @@ final class WhepPlayer: NSObject {
             .replacingOccurrences(of: "\r", with: "\n")
     }
 
-    private func sanitizeAnswerSDP(_ sdp: String) -> (sdp: String, candidates: [RTCIceCandidate]) {
+    private func sanitizedAnswerCandidates(from sdp: String) -> [SanitizedAnswer] {
+        var seenSDPs = Set<String>()
+        var answers: [SanitizedAnswer] = []
+
+        for mode in AnswerSanitizationMode.allCases {
+            let sanitized = sanitizeAnswerSDP(sdp, mode: mode)
+            guard seenSDPs.insert(sanitized.sdp).inserted else {
+                continue
+            }
+
+            answers.append(sanitized)
+        }
+
+        return answers
+    }
+
+    private func sanitizeAnswerSDP(_ sdp: String, mode: AnswerSanitizationMode) -> SanitizedAnswer {
         var currentMid: String?
         var currentMLineIndex: Int32 = -1
         var candidates: [RTCIceCandidate] = []
@@ -317,6 +362,9 @@ final class WhepPlayer: NSObject {
 
         for rawLine in sdp.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
             let line = normalizeAnswerLine(rawLine)
+            guard !line.isEmpty else {
+                continue
+            }
 
             if line.hasPrefix("m=") {
                 currentMLineIndex += 1
@@ -332,6 +380,10 @@ final class WhepPlayer: NSObject {
 
             if line.hasPrefix("a=candidate:") {
                 let candidateSDP = String(line.dropFirst("a=".count))
+                guard isRtpCandidate(candidateSDP) else {
+                    continue
+                }
+
                 candidates.append(RTCIceCandidate(
                     sdp: candidateSDP,
                     sdpMLineIndex: currentMLineIndex,
@@ -342,17 +394,24 @@ final class WhepPlayer: NSObject {
 
             if line.hasPrefix("a=end-of-candidates")
                 || line.hasPrefix("a=extmap-allow-mixed")
-                || line.hasPrefix("a=extmap:") {
+                || line.hasPrefix("a=extmap:")
+                || shouldDropAnswerLine(line, mode: mode) {
                 continue
             }
 
             answerLines.append(line)
         }
 
-        return (answerLines.joined(separator: "\n"), candidates)
+        return SanitizedAnswer(
+            mode: mode,
+            sdp: answerLines.joined(separator: "\r\n") + "\r\n",
+            candidates: candidates
+        )
     }
 
     private func normalizeAnswerLine(_ line: String) -> String {
+        let line = line.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+
         if line.hasPrefix("a=msid-semantic:WMS") {
             return line.replacingOccurrences(of: "a=msid-semantic:WMS", with: "a=msid-semantic: WMS")
         }
@@ -366,6 +425,36 @@ final class WhepPlayer: NSObject {
         }
 
         return String(line[..<range.lowerBound])
+    }
+
+    private func shouldDropAnswerLine(_ line: String, mode: AnswerSanitizationMode) -> Bool {
+        switch mode {
+        case .unifiedPlan:
+            return line.hasPrefix("a=ssrc:")
+                && (line.contains(" msid:")
+                    || line.contains(" mslabel:")
+                    || line.contains(" label:"))
+        case .ssrcMsid:
+            return line.hasPrefix("a=msid:")
+                || (line.hasPrefix("a=ssrc:")
+                    && (line.contains(" mslabel:")
+                        || line.contains(" label:")))
+        case .minimalMsid:
+            return line.hasPrefix("a=msid:")
+                || (line.hasPrefix("a=ssrc:")
+                    && (line.contains(" msid:")
+                        || line.contains(" mslabel:")
+                        || line.contains(" label:")))
+        }
+    }
+
+    private func isRtpCandidate(_ candidateSDP: String) -> Bool {
+        let fields = candidateSDP.split(separator: " ")
+        guard fields.count > 1 else {
+            return true
+        }
+
+        return fields[1] == "1"
     }
 
     private func addPendingRemoteCandidates() {
@@ -430,6 +519,18 @@ extension WhepPlayer: RTCPeerConnectionDelegate {
             self.attachRemoteVideoTrack(videoTrack)
         }
     }
+}
+
+private struct SanitizedAnswer {
+    let mode: AnswerSanitizationMode
+    let sdp: String
+    let candidates: [RTCIceCandidate]
+}
+
+private enum AnswerSanitizationMode: String, CaseIterable {
+    case unifiedPlan = "unified-plan"
+    case ssrcMsid = "ssrc-msid"
+    case minimalMsid = "minimal-msid"
 }
 
 private enum WhepRuntimeError: LocalizedError {
