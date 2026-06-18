@@ -36,7 +36,11 @@ final class WhepPlayer: NSObject {
             self.hasPostedOffer = false
             self.notifyStatus("Creating peer connection")
 
-            let peerConnection = self.makePeerConnection()
+            guard let peerConnection = self.makePeerConnection() else {
+                self.fail(WhepRuntimeError.message("Failed to create RTCPeerConnection."))
+                return
+            }
+
             self.peerConnection = peerConnection
             self.addReceiveOnlyTransceivers(to: peerConnection)
             self.createOffer(on: peerConnection)
@@ -49,7 +53,7 @@ final class WhepPlayer: NSObject {
         }
     }
 
-    private func makePeerConnection() -> RTCPeerConnection {
+    private func makePeerConnection() -> RTCPeerConnection? {
         let config = RTCConfiguration()
         config.sdpSemantics = .unifiedPlan
         config.continualGatheringPolicy = .gatherOnce
@@ -62,11 +66,7 @@ final class WhepPlayer: NSObject {
             optionalConstraints: ["DtlsSrtpKeyAgreement": "true"]
         )
 
-        guard let peerConnection = factory.peerConnection(with: config, constraints: constraints, delegate: self) else {
-            fatalError("RTCPeerConnectionFactory failed to create a peer connection.")
-        }
-
-        return peerConnection
+        return factory.peerConnection(with: config, constraints: constraints, delegate: self)
     }
 
     private func addReceiveOnlyTransceivers(to peerConnection: RTCPeerConnection) {
@@ -167,7 +167,7 @@ final class WhepPlayer: NSObject {
         }
 
         notifyStatus("Applying WHEP answer: \(validation.summary)")
-        let answer = RTCSessionDescription(type: .answer, sdp: normalizeSDPForWebRTC(answerSDP))
+        let answer = RTCSessionDescription(type: .answer, sdp: validationSDP)
         peerConnection?.setRemoteDescription(answer) { [weak self] error in
             guard let self else {
                 return
@@ -254,13 +254,6 @@ final class WhepPlayer: NSObject {
             .replacingOccurrences(of: "\r", with: "\n")
     }
 
-    private func normalizeSDPForWebRTC(_ sdp: String) -> String {
-        let lines = normalizeSDPForValidation(sdp)
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .map(String.init)
-        let trimmedLines = lines.last == "" ? Array(lines.dropLast()) : lines
-        return trimmedLines.joined(separator: "\r\n") + "\r\n"
-    }
 }
 
 extension WhepPlayer: RTCPeerConnectionDelegate {
