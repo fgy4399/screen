@@ -3,6 +3,8 @@ import WebRTC
 
 final class PlayerViewController: UIViewController {
     private let videoView = RTCMTLVideoView()
+    private let scrollView = UIScrollView()
+    private let panel = UIStackView()
     private let urlField = UITextField()
     private let tokenField = UITextField()
     private let startButton = UIButton(type: .system)
@@ -15,6 +17,12 @@ final class PlayerViewController: UIViewController {
         super.viewDidLoad()
         player.delegate = self
         buildInterface()
+        observeKeyboard()
+        installDismissKeyboardGesture()
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     private func buildInterface() {
@@ -25,11 +33,15 @@ final class PlayerViewController: UIViewController {
         videoView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(videoView)
 
-        let panel = UIStackView()
+        scrollView.keyboardDismissMode = .interactive
+        scrollView.alwaysBounceVertical = true
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(scrollView)
+
         panel.axis = .vertical
         panel.spacing = 10
         panel.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(panel)
+        scrollView.addSubview(panel)
 
         configureTextField(urlField, placeholder: "http://192.168.1.10:8889/mystream")
         urlField.keyboardType = .URL
@@ -69,10 +81,15 @@ final class PlayerViewController: UIViewController {
             videoView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             videoView.heightAnchor.constraint(equalTo: view.heightAnchor, multiplier: 0.62),
 
-            panel.topAnchor.constraint(equalTo: videoView.bottomAnchor, constant: 16),
-            panel.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
-            panel.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
-            panel.bottomAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -16),
+            scrollView.topAnchor.constraint(equalTo: videoView.bottomAnchor),
+            scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+
+            panel.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor, constant: 16),
+            panel.leadingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.leadingAnchor, constant: 16),
+            panel.trailingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.trailingAnchor, constant: -16),
+            panel.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor, constant: -16),
 
             urlField.heightAnchor.constraint(equalToConstant: 44),
             tokenField.heightAnchor.constraint(equalToConstant: 44),
@@ -82,6 +99,9 @@ final class PlayerViewController: UIViewController {
 
     private func configureTextField(_ textField: UITextField, placeholder: String) {
         textField.placeholder = placeholder
+        textField.delegate = self
+        textField.returnKeyType = .done
+        textField.inputAccessoryView = keyboardToolbar()
         textField.borderStyle = .roundedRect
         textField.clearButtonMode = .whileEditing
         textField.textColor = .white
@@ -99,6 +119,71 @@ final class PlayerViewController: UIViewController {
         button.backgroundColor = UIColor(red: 0.02, green: 0.42, blue: 0.44, alpha: 1)
         button.layer.cornerRadius = 10
         button.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
+    }
+
+    private func keyboardToolbar() -> UIToolbar {
+        let toolbar = UIToolbar()
+        toolbar.sizeToFit()
+        toolbar.items = [
+            UIBarButtonItem(barButtonSystemItem: .flexibleSpace, target: nil, action: nil),
+            UIBarButtonItem(title: "Done", style: .done, target: self, action: #selector(dismissKeyboard))
+        ]
+        return toolbar
+    }
+
+    private func observeKeyboard() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(keyboardWillChangeFrame(_:)),
+            name: UIResponder.keyboardWillChangeFrameNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(keyboardWillHide(_:)),
+            name: UIResponder.keyboardWillHideNotification,
+            object: nil
+        )
+    }
+
+    private func installDismissKeyboardGesture() {
+        let tapGesture = UITapGestureRecognizer(target: self, action: #selector(dismissKeyboard))
+        tapGesture.cancelsTouchesInView = false
+        view.addGestureRecognizer(tapGesture)
+    }
+
+    @objc private func keyboardWillChangeFrame(_ notification: Notification) {
+        guard let endFrame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else {
+            return
+        }
+
+        let keyboardFrame = view.convert(endFrame, from: nil)
+        let overlap = max(0, view.bounds.maxY - keyboardFrame.minY)
+        updateScrollInsets(bottom: overlap)
+        scrollActiveFieldIntoView()
+    }
+
+    @objc private func keyboardWillHide(_ notification: Notification) {
+        updateScrollInsets(bottom: 0)
+    }
+
+    private func updateScrollInsets(bottom: CGFloat) {
+        let inset = UIEdgeInsets(top: 0, left: 0, bottom: bottom + 16, right: 0)
+        scrollView.contentInset = inset
+        scrollView.scrollIndicatorInsets = inset
+    }
+
+    private func scrollActiveFieldIntoView() {
+        guard let activeField = [urlField, tokenField].first(where: { $0.isFirstResponder }) else {
+            return
+        }
+
+        let fieldFrame = activeField.convert(activeField.bounds, to: scrollView)
+        scrollView.scrollRectToVisible(fieldFrame.insetBy(dx: 0, dy: -20), animated: true)
+    }
+
+    @objc private func dismissKeyboard() {
+        view.endEditing(true)
     }
 
     @objc private func startTapped() {
@@ -146,5 +231,12 @@ extension PlayerViewController: WhepPlayerDelegate {
 
     func whepPlayer(_ player: WhepPlayer, didFailWith error: Error) {
         statusLabel.text = "Error: \(error.localizedDescription)"
+    }
+}
+
+extension PlayerViewController: UITextFieldDelegate {
+    func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+        textField.resignFirstResponder()
+        return true
     }
 }
