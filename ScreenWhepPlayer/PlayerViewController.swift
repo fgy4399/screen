@@ -42,6 +42,7 @@ final class PlayerViewController: UIViewController {
     }
 
     deinit {
+        keepScreenAwake(false)
         NotificationCenter.default.removeObserver(self)
     }
 
@@ -272,6 +273,7 @@ final class PlayerViewController: UIViewController {
 
         let token = tokenField.text?.trimmingCharacters(in: .whitespacesAndNewlines)
         let endpoint = WhepEndpoint(url: url, bearerToken: token?.isEmpty == false ? token : nil)
+        keepScreenAwake(true)
         player.start(endpoint: endpoint)
     }
 
@@ -291,7 +293,12 @@ final class PlayerViewController: UIViewController {
     }
 
     @objc private func stopTapped() {
+        keepScreenAwake(false)
         player.stop()
+    }
+
+    private func keepScreenAwake(_ enabled: Bool) {
+        UIApplication.shared.isIdleTimerDisabled = enabled
     }
 
     @objc private func fullscreenTapped() {
@@ -340,6 +347,7 @@ extension PlayerViewController: WhepPlayerDelegate {
     }
 
     func whepPlayer(_ player: WhepPlayer, didFailWith error: Error) {
+        keepScreenAwake(false)
         statusLabel.text = "Error: \(error.localizedDescription)"
         if !lastDebugInfo.isEmpty {
             UIPasteboard.general.string = lastDebugInfo
